@@ -4,30 +4,43 @@ import sqlite3
 from datetime import datetime, timedelta
 import difflib
 import telebot
-from datetime import datetime, UTC
+import traceback
+from datetime import datetime, timezone, timedelta
+from datetime import timezone
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-bot = telebot.TeleBot("7671940309:AAGr3PdGbv0o8DRVR8eZKu5cc07fzT2tCBw")
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+db_path = os.getenv('DATABASE_PATH')
+bot_token = os.getenv('BOT_TOKEN')
+
+print(f"[DEBUG] BOT_TOKEN: {bot_token}")
+
+bot = telebot.TeleBot(bot_token)
+
 user_data = {}
 feedback_data = {}
 user_state = {}
 
 @bot.message_handler(func=lambda message: message.chat.id in user_state and user_state[message.chat.id]['step'] == 'awaiting_feedback')
 def process_feedback(message):
-    user_id = message.chat.id
-    partner_id = user_state[user_id]['partner_id']
+    chat_id = message.chat.id
+    partner_id = user_state[chat_id]['partner_id']
     text = message.text.strip()
 
-    conn = sqlite3.connect('chck.db', check_same_thread=False, timeout=10)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     cur = conn.cursor()
 
     # Проверка: уже есть отзыв?
     cur.execute("""
         SELECT 1 FROM feedback
         WHERE from_user = ? AND to_user = ?
-    """, (user_id, partner_id))
+    """, (chat_id, partner_id))
     if cur.fetchone():
-        bot.send_message(user_id, "⚠️ Вы уже оставили отзыв на этого пользователя.")
+        bot.send_message(chat_id, "⚠️ Вы уже оставили отзыв на этого пользователя.")
         print(f"[MATCHING] Возвращаем без совпадений/ошибка для {chat_id}")
         cur.close()
         conn.close()     
@@ -43,14 +56,14 @@ def process_feedback(message):
 
         # Обязательный комментарий при оценке 1 или 2
         if any(score in [1, 2] for score in scores) and not comment.strip():
-            bot.send_message(user_id, "❗ При оценке 1 или 2 требуется комментарий. Пожалуйста, добавьте комментарий к отзыву.")
+            bot.send_message(chat_id, "❗ При оценке 1 или 2 требуется комментарий. Пожалуйста, добавьте комментарий к отзыву.")
             print(f"[MATCHING] Возвращаем без совпадений/ошибка для {chat_id}")
             cur.close()
             conn.close()
             return
 
     except Exception as e:
-        bot.send_message(user_id, "⚠️ Неверный формат. Введите как `5,4,5 Комментарий`.")
+        bot.send_message(chat_id, "⚠️ Неверный формат. Введите как `5,4,5 Комментарий`.")
         print(f"[MATCHING] Возвращаем без совпадений/ошибка для {chat_id}")
         cur.close()
         conn.close()
@@ -62,30 +75,30 @@ def process_feedback(message):
         (from_user, to_user, question1, question2, question3, comment, timestamp)
         VALUES (?, ?, ?, ?, ?, ?, ?)
     """, (
-        user_id,
+        chat_id,
         partner_id,
         ease,
         activity,
         friendliness,
         comment,
-        datetime.now(UTC).isoformat()
+        datetime.now(timezone.utc).isoformat()
     ))
 
     # Если оценки плохие (любая <= 3) — блокируем повторный мэтч
     if any(score <= 3 for score in [ease, activity, friendliness]):
-        cur.execute("INSERT INTO past_matches (user1, user2, match_time) VALUES (?, ?, ?)", (user_id, partner_id, datetime.now(UTC).isoformat()))
-        cur.execute("INSERT INTO past_matches (user1, user2, match_time) VALUES (?, ?, ?)", (partner_id, user_id, datetime.now(UTC).isoformat()))
+        cur.execute("INSERT INTO past_matches (user1, user2, match_time) VALUES (?, ?, ?)", (chat_id, partner_id, datetime.now(timezone.utc).isoformat()))
+        cur.execute("INSERT INTO past_matches (user1, user2, match_time) VALUES (?, ?, ?)", (partner_id, chat_id, datetime.now(timezone.utc).isoformat()))
 
     conn.commit()
     cur.close()
     conn.close()
 
-    bot.send_message(user_id, "✅ Спасибо! Ваш отзыв сохранён.")
-    del user_state[user_id]
+    bot.send_message(chat_id, "✅ Спасибо! Ваш отзыв сохранён.")
+    del user_state[chat_id]
 
 
 # def reset_database():
-#     conn = sqlite3.connect('chck.db', check_same_thread=False)
+#     conn = sqlite3.connect(db_path, check_same_thread=False)
 #     cur = conn.cursor()
 
 #     cur.execute("DROP TABLE IF EXISTS feedback")
@@ -107,7 +120,7 @@ def process_feedback(message):
 #     )''')
 
 #     cur.execute('''CREATE TABLE matches (
-#         user_id INTEGER PRIMARY KEY,
+#         chat_id INTEGER PRIMARY KEY,
 #         partner_id INTEGER,
 #         match_time TEXT
 #     )''')
@@ -146,8 +159,10 @@ def process_feedback(message):
 # reset_database()
 
 def create_tables_if_not_exist():
-    conn = sqlite3.connect('chck.db', check_same_thread=False, timeout=10)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     cur = conn.cursor()
+
+    cur.execute("DROP TABLE IF EXISTS matches")
 
     cur.execute('''CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY,
@@ -160,8 +175,8 @@ def create_tables_if_not_exist():
     )''')
 
     cur.execute('''CREATE TABLE IF NOT EXISTS matches (
-        user_id INTEGER PRIMARY KEY,
-        partner_id INTEGER,
+        user1 INTEGER,
+        user2 INTEGER,
         match_time TEXT
     )''')
 
@@ -192,7 +207,7 @@ def create_tables_if_not_exist():
 
 
 def update_schema():
-    conn = sqlite3.connect('chck.db', check_same_thread=False, timeout=10)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     cur = conn.cursor()
 
     # Получаем список существующих колонок
@@ -210,7 +225,7 @@ def update_schema():
     conn.close()
 
 def init_review_queue():
-    conn = sqlite3.connect('chck.db', check_same_thread=False, timeout=10)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     cur = conn.cursor()
     cur.execute('''CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY,
@@ -227,8 +242,8 @@ def init_review_queue():
         send_time TEXT
     )''')
     cur.execute('''CREATE TABLE IF NOT EXISTS matches (
-        user_id INTEGER PRIMARY KEY,
-        partner_id INTEGER,
+        user1 INTEGER,
+        user2 INTEGER,
         match_time TEXT
     )''')
     cur.execute('''
@@ -247,30 +262,26 @@ def init_review_queue():
 
 def age_range_to_tuple(age_str):
     if '+' in age_str:
-        print(f"[MATCHING] Возвращаем без совпадений/ошибка для {chat_id}")
         return (int(age_str.replace('+', '')), 99)
     start, end = map(int, age_str.split('-'))
-    print(f"[MATCHING] Возвращаем без совпадений/ошибка для {chat_id}")
     return (start, end)
 
 def age_overlap(age1, age2):
     r1 = age_range_to_tuple(age1)
     r2 = age_range_to_tuple(age2)
-    print(f"[MATCHING] Возвращаем без совпадений/ошибка для {chat_id}")
     return max(r1[0], r2[0]) <= min(r1[1], r2[1])
 
 def level_match(level1, level2):
-    print(f"[MATCHING] Возвращаем без совпадений/ошибка для {chat_id}")
     return level1 == level2 or (level1 in level2 or level2 in level1)
 
-def get_average_feedback(user_id):
-    conn = sqlite3.connect('chck.db', check_same_thread=False, timeout=10)
+def get_average_feedback(chat_id):
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     cur = conn.cursor()
     cur.execute("""
         SELECT AVG(question1), AVG(question2), AVG(question3)
         FROM feedback
         WHERE to_user = ?
-    """, (user_id,))
+    """, (chat_id,))
     result = cur.fetchone()
     conn.close()
 
@@ -303,10 +314,10 @@ def restart(message):
     chat_id = message.chat.id
 
     # Удаляем данные пользователя из базы
-    conn = sqlite3.connect('chck.db', check_same_thread=False, timeout=10)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     cur = conn.cursor()
     cur.execute("DELETE FROM users WHERE id = ?", (chat_id,))
-    cur.execute("DELETE FROM matches WHERE user_id = ? OR partner_id = ?", (chat_id, chat_id))
+    cur.execute("DELETE FROM matches WHERE user1 = ? OR user2 = ?", (chat_id, chat_id))
     conn.commit()
     cur.close()
     conn.close()
@@ -355,6 +366,8 @@ def ask_question(chat_id, question, options):
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
     chat_id = call.message.chat.id
+    if chat_id not in user_data:
+        user_data[chat_id] = {}
     data = call.data
     bot.answer_callback_query(call.id)
 
@@ -372,7 +385,17 @@ def handle_callback(call):
         save_to_db(chat_id)
 
 def save_to_db(chat_id):
-    conn = sqlite3.connect('chck.db', check_same_thread=False, timeout=10)
+    required_fields = ['name', 'age', 'kazakh_level', 'gender', 'preferred_gender', 'telegram_username']
+    if chat_id not in user_data:
+        print(f"[ERROR] No user data for chat_id: {chat_id}")
+        return
+
+    missing_fields = [f for f in required_fields if f not in user_data[chat_id]]
+    if missing_fields:
+        print(f"[ERROR] Missing fields for user {chat_id}: {missing_fields}")
+        return  # Или можно raise ValueError(...)
+    
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     cur = conn.cursor()
     cur.execute("""REPLACE INTO users (id, name, age, kazakh_level, gender, preferred_gender, telegram_username) 
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
@@ -406,8 +429,8 @@ def send_review_request(chat_id, other_id):
     user_state[other_id] = {'step': 'awaiting_feedback', 'partner_id': chat_id}  # Ensure state is set
 
 def schedule_review(chat_id1, chat_id2):
-    review_time = (datetime.now(UTC) + timedelta(hours=48)).isoformat()
-    conn = sqlite3.connect('chck.db', check_same_thread=False, timeout=10)
+    review_time = (datetime.now(timezone.utc) + timedelta(hours=48)).isoformat()
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     cur = conn.cursor()
     cur.execute("INSERT INTO review_queue (chat_id1, chat_id2, send_time) VALUES (?, ?, ?)", (chat_id1, chat_id2, review_time))
     conn.commit()
@@ -417,9 +440,8 @@ def schedule_review(chat_id1, chat_id2):
 def schedule_review_check():
     def checker():
         while True:
-            from datetime import datetime, UTC
-            now = datetime.now(UTC)
-            conn = sqlite3.connect('chck.db', check_same_thread=False, timeout=10)
+            now = datetime.now(timezone.utc)
+            conn = sqlite3.connect(db_path, check_same_thread=False)
             cur = conn.cursor()
             cur.execute("SELECT chat_id1, chat_id2, send_time FROM review_queue")
             rows = cur.fetchall()
@@ -442,17 +464,17 @@ def schedule_review_check():
 
 def find_match(chat_id):
     print(f"[MATCHING] Начинаем подбор для {chat_id}")
-    conn = sqlite3.connect('chck.db', check_same_thread=False, timeout=10)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     cur = conn.cursor()
     try:
         # ✅ Проверка, не находится ли пользователь уже в активной паре
         cur.execute("""
         SELECT match_time FROM matches 
-        WHERE user_id = ? OR partner_id = ?""", (chat_id, chat_id))
+        WHERE user1 = ? OR user2 = ?""", (chat_id, chat_id))
         result = cur.fetchone()
         if result:
-            match_time = datetime.fromisoformat(result[0]).replace(tzinfo=UTC)
-            if datetime.now(UTC) < match_time + timedelta(hours=48):
+            match_time = datetime.fromisoformat(result[0]).replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) < match_time + timedelta(hours=48):
                 bot.send_message(chat_id, "⏳ Вы уже в паре. Подождите 48 часов до следующего собеседника.")
                 print(f"[MATCHING] Возвращаем без совпадений/ошибка для {chat_id}")
                 cur.close()
@@ -460,20 +482,19 @@ def find_match(chat_id):
                 return
             else:
                 # Удаляем устаревшую пару
-                cur.execute("DELETE FROM matches WHERE user_id = ?", (chat_id,))
+                cur.execute("DELETE FROM matches WHERE chat_id = ?", (chat_id,))
                 conn.commit()
 
         # ✅ Получаем список пользователей, которые уже в паре (актуальной)
-        cur.execute("SELECT user_id, match_time FROM matches")
+        cur.execute("SELECT user1, user2, match_time FROM matches")
         busy_users = {row[0]: row[1] for row in cur.fetchall()}
 
-        from datetime import datetime, UTC
-        now = datetime.now(UTC)
+        now = datetime.now(timezone.utc)
 
         to_remove = [uid for uid, m_time in busy_users.items()
                     if datetime.fromisoformat(m_time) + timedelta(hours=48) <= now]
         for uid in to_remove:
-            cur.execute("DELETE FROM matches WHERE user_id = ?", (uid,))
+            cur.execute("DELETE FROM matches WHERE chat_id = ?", (uid,))
             busy_users.pop(uid)
 
         # ✅ Получаем всех доступных пользователей, исключая текущего и тех, кто уже в паре
@@ -519,9 +540,9 @@ def find_match(chat_id):
                 bot.send_message(chat_id, f"🎉 Вы совпали с @{username}!\n👤 Имя: {name}\n📅 Возраст: {age}\n⚧ Пол: {gender}\n🗣 Уровень казахского: {level}")
                 bot.send_message(other_id, f"🎉 Вы совпали с @{current['telegram_username']}!\n👤 Имя: {current['name']}\n📅 Возраст: {current['age']}\n⚧ Пол: {current['gender']}\n🗣 Уровень казахского: {current['kazakh_level']}")
 
-                match_time = datetime.now(UTC).isoformat()
-                cur.execute("REPLACE INTO matches (user_id, partner_id, match_time) VALUES (?, ?, ?)", (chat_id, other_id, match_time))
-                cur.execute("REPLACE INTO matches (user_id, partner_id, match_time) VALUES (?, ?, ?)", (other_id, chat_id, match_time))
+                match_time = datetime.now(timezone.utc).isoformat()
+                cur.execute("REPLACE INTO matches (chat_id, partner_id, match_time) VALUES (?, ?, ?)", (chat_id, other_id, match_time))
+                cur.execute("REPLACE INTO matches (chat_id, partner_id, match_time) VALUES (?, ?, ?)", (other_id, chat_id, match_time))
                 cur.execute("INSERT INTO past_matches (user1, user2, match_time) VALUES (?, ?, ?)", (chat_id, other_id, match_time))
                 cur.execute("INSERT INTO past_matches (user1, user2, match_time) VALUES (?, ?, ?)", (other_id, chat_id, match_time))
                 conn.commit()
@@ -539,6 +560,7 @@ def find_match(chat_id):
     
     except Exception as e:
         print(f"[ERROR in find_match] {e}")
+        traceback.print_exc()
 
     finally:
         cur.close()
@@ -548,9 +570,8 @@ def find_match(chat_id):
 # Запускаем проверку отзывов
 schedule_review_check()
 # Запускаем бота
-import time
 
 if __name__ == "__main__":
-    schedule_review_check()
     create_tables_if_not_exist()
+    schedule_review_check()
     bot.polling(none_stop=True) 
