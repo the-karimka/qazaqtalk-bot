@@ -1,0 +1,26 @@
+{
+  "build": {
+    "builder": "NIXPACKS"
+  },
+  "deploy": {
+    "startCommand": "python bot.py",
+    "variables": {
+      "BOT_TOKEN": {
+        "description": "Токен вашего Telegram-бота",
+        "required": true
+      },
+      "WEBHOOK_URL": {
+        "description": "URL вашего проекта (например: https://qazaqtalk-bot.up.railway.app)",
+        "required": true
+      },
+      "DATABASE_PATH": {
+        "value": "/data/database.db",
+        "description": "Путь к файлу базы данных"
+      },
+      "PORT": {
+        "value": "8080",
+        "description": "Порт для Flask"
+      }
+    }
+  }
+}
