@@ -3,7 +3,7 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "python main2.py",
+    "startCommand": "python bot.py",
     "variables": {
       "BOT_TOKEN": {
         "description": "Токен вашего Telegram-бота",
