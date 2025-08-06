@@ -1,6 +1,7 @@
 ﻿{
   "build": {
     "builder": "NIXPACKS",
+<<<<<<< HEAD
     "buildCommand": "cp main2.py /app/bot.py && pip install -r requirements.txt"
   },
   "deploy": {
@@ -12,6 +13,21 @@
     "variables": {
       "BOT_TOKEN": {"required": true},
       "DATABASE_PATH": {"value": "/data/database.db"}
+=======
+    "buildCommand": "pip install --upgrade pip && pip install -r requirements.txt && cp main2.py /app/bot.py"
+  },
+  "deploy": {
+    "startCommand": "python /app/bot.py",
+    "variables": {
+      "BOT_TOKEN": {
+        "description": "Токен из @BotFather",
+        "required": true
+      },
+      "DATABASE_PATH": {
+        "value": "/data/database.db",
+        "description": "Путь к БД"
+      }
+>>>>>>> 0f1148002712d30adbe5b747c2618a5f28358a4c
     }
   }
 }
