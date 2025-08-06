@@ -44,7 +44,7 @@ class Database:
         db_dir = os.path.dirname(self.db_path)
         if db_dir and not os.path.exists(db_dir):
             os.makedirs(db_dir)
-            
+
     def _init_db(self):
         """Инициализация таблиц в базе данных"""
         tables = [
@@ -174,6 +174,11 @@ def start(message):
     except Exception as e:
         logger.error(f"Ошибка в /start: {traceback.format_exc()}")
         bot.send_message(message.chat.id, "⚠️ Произошла ошибка. Попробуйте /start")
+
+@bot.message_handler(func=lambda message: True)
+def handle_all_messages(message):
+    """Обработка всех остальных сообщений"""
+    bot.send_message(message.chat.id, "Спасибо за сообщение! Пожалуйста, используйте /start для начала работы.")
 
 def get_username(message):
     """Получение username пользователя"""
@@ -466,6 +471,4 @@ if __name__ == '__main__':
     webhook_url = f"https://{WEBHOOK_URL}/{BOT_TOKEN}"
     bot.set_webhook(url=webhook_url)
     logger.info(f"Webhook установлен: {webhook_url}")
-    
-    # Запуск Flask приложения
     app.run(host='0.0.0.0', port=PORT)
