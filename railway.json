@@ -4,7 +4,11 @@
     "buildCommand": "cp main2.py /app/bot.py && pip install -r requirements.txt"
   },
   "deploy": {
+<<<<<<< HEAD
     "startCommand": "python /app/bot.py",
+=======
+    "startCommand": "python bot.py",
+>>>>>>> aee80530267df64fa1f21e17e6d406b4c0afda8f
     "variables": {
       "BOT_TOKEN": {"required": true},
       "DATABASE_PATH": {"value": "/data/database.db"}
