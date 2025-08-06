@@ -1,7 +1,7 @@
 {
   "build": {
     "builder": "NIXPACKS",
-    "buildCommand": "cp main2.py /app/bot.py && pip install -r requirements.txt"
+    "buildCommand": "pip install --upgrade pip && pip install -r requirements.txt && cp main2.py /app/bot.py"
   },
   "deploy": {
     "startCommand": "python /app/bot.py",
