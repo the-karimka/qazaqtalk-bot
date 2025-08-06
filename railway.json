@@ -1,25 +1,18 @@
 {
   "build": {
-    "builder": "NIXPACKS"
+    "builder": "NIXPACKS",
+    "buildCommand": "cp main2.py /app/bot.py && pip install -r requirements.txt"
   },
   "deploy": {
-    "startCommand": "python bot.py",
+    "startCommand": "python /app/bot.py",
     "variables": {
       "BOT_TOKEN": {
-        "description": "Токен вашего Telegram-бота",
-        "required": true
-      },
-      "WEBHOOK_URL": {
-        "description": "URL вашего проекта (например: https://qazaqtalk-bot.up.railway.app)",
+        "description": "Токен из @BotFather",
         "required": true
       },
       "DATABASE_PATH": {
         "value": "/data/database.db",
-        "description": "Путь к файлу базы данных"
-      },
-      "PORT": {
-        "value": "8080",
-        "description": "Порт для Flask"
+        "description": "Путь к БД"
       }
     }
   }
