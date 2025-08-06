@@ -1,23 +1,10 @@
-﻿{
+{
   "build": {
     "builder": "NIXPACKS",
-<<<<<<< HEAD
-    "buildCommand": "cp main2.py /app/bot.py && pip install -r requirements.txt"
-  },
-  "deploy": {
-<<<<<<< HEAD
-    "startCommand": "python /app/bot.py",
-=======
-    "startCommand": "python bot.py",
->>>>>>> aee80530267df64fa1f21e17e6d406b4c0afda8f
-    "variables": {
-      "BOT_TOKEN": {"required": true},
-      "DATABASE_PATH": {"value": "/data/database.db"}
-=======
     "buildCommand": "pip install --upgrade pip && pip install -r requirements.txt && cp main2.py /app/bot.py"
   },
   "deploy": {
-    "startCommand": "python /app/bot.py",
+    "startCommand": "gunicorn --bind :8080 --workers 1 --threads 8 --timeout 0 bot:app",
     "variables": {
       "BOT_TOKEN": {
         "description": "Токен из @BotFather",
@@ -26,8 +13,15 @@
       "DATABASE_PATH": {
         "value": "/data/database.db",
         "description": "Путь к БД"
+      },
+      "PORT": {
+        "value": "8080",
+        "description": "Порт для приложения"
+      },
+      "WEBHOOK_URL": {
+        "description": "Публичный адрес Railway (без https://)",
+        "required": true
       }
->>>>>>> 0f1148002712d30adbe5b747c2618a5f28358a4c
     }
   }
 }
