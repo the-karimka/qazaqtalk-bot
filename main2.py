@@ -645,13 +645,42 @@ def index():
 
 # --- Запуск приложения ---
 if __name__ == '__main__':
-    # Запуск фоновой проверки отзывов
-    threading.Thread(target=schedule_review_check, daemon=True).start()
-    
-    # Установка webhook
-    bot.remove_webhook()
-    time.sleep(1)
-    webhook_url = f"https://{WEBHOOK_URL}/{BOT_TOKEN}"
-    bot.set_webhook(url=webhook_url)
-    logger.info(f"Webhook установлен: {webhook_url}")
-    app.run(host='0.0.0.0', port=PORT)
+    try:
+        # 1. Запуск фоновых процессов
+        threading.Thread(target=schedule_review_check, daemon=True).start()
+        
+        # 2. Настройка webhook
+        logger.info("Настройка webhook...")
+        bot.remove_webhook()
+        time.sleep(2)  # Увеличенная задержка для надежности
+        
+        webhook_url = f"https://{WEBHOOK_URL}/{BOT_TOKEN}"
+        if not WEBHOOK_URL:
+            logger.error("WEBHOOK_URL не установлен!")
+            raise ValueError("WEBHOOK_URL не установлен")
+            
+        bot.set_webhook(
+            url=webhook_url,
+            max_connections=50,
+            allowed_updates=["message", "callback_query"]
+        )
+        logger.info(f"Webhook установлен на: {webhook_url}")
+        
+        # 3. Запуск сервера
+        logger.info(f"Запуск сервера на порту {PORT}...")
+        
+        # Для production используем Waitress
+        from waitress import serve
+        serve(
+            app,
+            host='0.0.0.0',
+            port=PORT,
+            threads=4,
+            url_scheme='https'
+        )
+        
+    except KeyboardInterrupt:
+        logger.info("Бот остановлен вручную")
+    except Exception as e:
+        logger.error(f"Критическая ошибка: {str(e)}")
+        raise
