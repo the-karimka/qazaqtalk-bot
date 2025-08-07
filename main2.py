@@ -38,12 +38,50 @@ class Database:
         self.db_path = db_path
         self.lock = threading.Lock()
         self._init_db()
-
+    
+    def _get_connection(self):  # ✅ Correctly indented inside the class
+        """Возвращает соединение с базой данных"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+    
     def _ensure_db_dir(self):
         """Создает папку для БД, если её нет"""
         db_dir = os.path.dirname(self.db_path)
         if db_dir and not os.path.exists(db_dir):
             os.makedirs(db_dir)
+    def execute(self, query, params=(), commit=False):
+                """Безопасное выполнение SQL-запроса"""
+                with self.lock:
+                    with self._get_connection() as conn:
+                        cur = conn.cursor()
+                        try:
+                            cur.execute(query, params)
+                            if commit:
+                                conn.commit()
+                            if query.strip().upper().startswith('SELECT'):
+                                return cur.fetchall()
+                            return True
+                        except Exception as e:
+                            logger.error(f"Ошибка БД: {e}\nЗапрос: {query}\nПараметры: {params}")
+                            conn.rollback()
+                            raise
+
+    def add_missing_columns(self):
+        """Добавляет отсутствующие столбцы в таблицы"""
+        try:
+            # Проверяем существование столбца rating
+            cols = self.execute("PRAGMA table_info(users)")
+            if cols and isinstance(cols, list):  # Check if we got results
+                if not any(c[1] == 'rating' for c in cols):  # Column name is at index 1
+                    self.execute(
+                        "ALTER TABLE users ADD COLUMN rating REAL DEFAULT 3.0",
+                        commit=True
+                    )
+                    logger.info("Добавлен столбец rating в таблицу users")
+        except Exception as e:
+            logger.error(f"Ошибка проверки/добавления столбцов: {e}")
+            raise
 
     def _init_db(self):
         """Инициализация таблиц в базе данных"""
@@ -83,41 +121,22 @@ class Database:
                 chat_id1 INTEGER,
                 chat_id2 INTEGER,
                 send_time TEXT
-            )'''
+            )''',  
+            '''CREATE INDEX IF NOT EXISTS idx_feedback_to_user ON feedback(to_user)''',
+            '''CREATE INDEX IF NOT EXISTS idx_matches_user1 ON matches(user1)''',
+            '''CREATE INDEX IF NOT EXISTS idx_matches_user2 ON matches(user2)'''
         ]
-
-        with self._get_connection() as conn:
+        
+        with self._get_connection() as conn: 
             cur = conn.cursor()
             for table in tables:
                 cur.execute(table)
             conn.commit()
         logger.info(f"База данных инициализирована: {self.db_path}")
 
-    def _get_connection(self):
-        """Возвращает соединение с базой данных"""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
-
-    def execute(self, query, params=(), commit=False):
-        """Безопасное выполнение SQL-запроса"""
-        with self.lock:
-            with self._get_connection() as conn:
-                cur = conn.cursor()
-                try:
-                    cur.execute(query, params)
-                    if commit:
-                        conn.commit()
-                    if query.strip().upper().startswith('SELECT'):
-                        return cur.fetchall()
-                    return True
-                except Exception as e:
-                    logger.error(f"Ошибка БД: {e}\nЗапрос: {query}\nПараметры: {params}")
-                    conn.rollback()
-                    raise
-
 # Инициализация БД
 db = Database(DB_PATH)
+db.add_missing_columns()
 
 # --- Вспомогательные функции ---
 def age_range_to_tuple(age_str):
@@ -147,6 +166,28 @@ def get_average_feedback(user_id):
         return sum(result[0]) / 3
     return None
 
+def update_user_rating(user_id):
+    """Обновляет рейтинг пользователя в таблице users"""
+    try:
+        avg_rating = db.execute(
+            "SELECT AVG((question1 + question2 + question3) / 3.0) FROM feedback WHERE to_user = ?",
+            (user_id,)
+        )[0][0]
+        if avg_rating is not None:  # Явная проверка на None
+            db.execute(
+            "SELECT AVG((question1 + question2 + question3) / 3.0) FROM feedback WHERE to_user = ?",
+            (user_id,)
+        )
+        
+        if avg_rating:
+            db.execute(
+                "UPDATE users SET rating = ? WHERE id = ?",
+                (round(avg_rating, 2), user_id),
+                commit=True
+            )
+    except Exception as e:
+        logger.error(f"Ошибка обновления рейтинга для {user_id}: {e}")
+
 def ask_question(chat_id, question, options):
     """Отправляет вопрос с inline-кнопками"""
     markup = types.InlineKeyboardMarkup()
@@ -154,26 +195,102 @@ def ask_question(chat_id, question, options):
         markup.add(types.InlineKeyboardButton(option, callback_data=option))
     bot.send_message(chat_id, question, reply_markup=markup)
 
-# --- Обработчики команд ---
-@bot.message_handler(commands=['start'])
-def start(message):
-    """Обработчик команды /start"""
+# Объединённый обработчик start/restart
+def start_registration(message, is_restart=False):
+    """Общая функция для начала регистрации"""
     try:
-        username = message.from_user.username
-        if not username:
-            bot.send_message(message.chat.id, "Введите ваш Telegram username:")
-            bot.register_next_step_handler(message, get_username)
+        chat_id = message.chat.id
+        
+        # Более надежная очистка данных при рестарте
+        if is_restart:
+            try:
+                with db.lock:
+                    db.execute("DELETE FROM users WHERE id = ?", (chat_id,), commit=True)
+                    db.execute("DELETE FROM matches WHERE user1 = ? OR user2 = ?", 
+                             (chat_id, chat_id), commit=True)
+                    # Очищаем кэшированные данные
+                    user_data.pop(chat_id, None)
+                    user_state.pop(chat_id, None)
+            except Exception as e:
+                logger.error(f"Ошибка очистки данных при restart: {traceback.format_exc()}")
+                raise
+
+        # Проверяем username более надежно
+        username = getattr(message.from_user, 'username', None)
+        if not username or not username.strip():
+            msg = ("🔁 Анкета сброшена. Введите ваш Telegram username (должен начинаться с @):" 
+                  if is_restart else "Введите ваш Telegram username (должен начинаться с @):")
+            sent_msg = bot.send_message(chat_id, msg)
+            bot.register_next_step_handler(sent_msg, get_username)
             return
 
-        user_data[message.chat.id] = {'telegram_username': username}
-        bot.send_message(
-            message.chat.id,
-            "Сәлем! 👋 Добро пожаловать в QazaqTalk!\n\nВведите ваше имя:"
+        # Инициализация/сброс данных пользователя
+        user_data[chat_id] = {'telegram_username': username.strip('@')}
+        
+        greeting = "🔁 Анкета сброшена. Давайте начнем заново!\n\n" if is_restart else ""
+        sent_msg = bot.send_message(
+            chat_id,
+            f"{greeting}Сәлем! 👋 Добро пожаловать в QazaqTalk!\n\nВведите ваше имя:"
         )
-        bot.register_next_step_handler(message, get_name)
+        bot.register_next_step_handler(sent_msg, get_name)
+        
     except Exception as e:
-        logger.error(f"Ошибка в /start: {traceback.format_exc()}")
-        bot.send_message(message.chat.id, "⚠️ Произошла ошибка. Попробуйте /start")
+        logger.error(f"Ошибка в {'/restart' if is_restart else '/start'}: {traceback.format_exc()}")
+        bot.send_message(chat_id, "⚠️ Произошла ошибка. Попробуйте снова через /start")
+
+@bot.message_handler(commands=['start'])
+def handle_start(message):
+    """Обработчик команды /start"""
+    start_registration(message)
+
+@bot.message_handler(commands=['restart'])
+def handle_restart(message):
+    """Обработчик команды /restart"""
+    start_registration(message, is_restart=True)
+
+@bot.message_handler(commands=['guidebook'])
+def send_guidebook(message):
+    """Улучшенный обработчик команды /guidebook"""
+    try:
+        chat_id = message.chat.id
+        guidebook_path = 'guidebook.docx'
+        
+        # Проверяем доступность файла
+        if not os.path.exists(guidebook_path):
+            logger.warning(f"Файл гайдбука не найден: {guidebook_path}")
+            bot.send_message(
+                chat_id,
+                "📚 Гайдбук временно недоступен. Администратор уже уведомлен о проблеме."
+            )
+            return
+
+        # Проверяем размер файла
+        file_size = os.path.getsize(guidebook_path) / (1024 * 1024)  # в MB
+        if file_size > 50:  # Telegram ограничивает 50MB для ботов
+            logger.error(f"Файл гайдбука слишком большой: {file_size:.2f}MB")
+            bot.send_message(
+                chat_id,
+                "⚠️ Файл гайдбука слишком большой. Мы работаем над этим."
+            )
+            return
+
+        # Отправляем файл с обработкой возможных ошибок
+        with open(guidebook_path, 'rb') as f:
+            bot.send_chat_action(chat_id, 'upload_document')
+            bot.send_document(
+                chat_id=chat_id,
+                document=f,
+                caption="📘 QazaqTalk Guidebook",
+                timeout=30,
+                visible_file_name="QazaqTalk_Guide.docx"  # Красивое имя файла
+            )
+            
+    except Exception as e:
+        logger.error(f"Ошибка отправки гайдбука: {traceback.format_exc()}")
+        bot.send_message(
+            chat_id,
+            "⚠️ Произошла непредвиденная ошибка при отправке гайдбука. Попробуйте позже."
+        )
 
 @bot.message_handler(func=lambda message: True)
 def handle_all_messages(message):
@@ -251,6 +368,7 @@ def save_to_db(chat_id):
 
 # --- Система мэтчинга ---
 def find_match(chat_id):
+    
     """Поиск совместимого собеседника"""
     try:
         logger.info(f"Поиск пары для {chat_id}")
@@ -273,18 +391,43 @@ def find_match(chat_id):
             (chat_id,)
         )[0]
 
+        if not current_user:
+                bot.send_message(chat_id, "❌ Ваш профиль не найден. Пожалуйста, пройдите регистрацию снова.")
+                return
+        
         exclude_users = {row['user1'] for row in db.execute(
             "SELECT user1 FROM matches"
         )}.union({chat_id})
 
+        # Получаем средний рейтинг текущего пользователя
+        current_rating = get_average_feedback(chat_id) or 3.0  # 3.0 - дефолтный рейтинг
+        
+        # Исключаем пользователей из past_matches
+        exclude_users |= {row['user2'] for row in db.execute(
+            "SELECT user2 FROM past_matches WHERE user1 = ?",
+            (chat_id,)
+        )}
+        
         potential_matches = db.execute(
-            """SELECT * FROM users 
-            WHERE id NOT IN ({}) 
-            AND preferred_gender IN (?, 'Не важно')
-            AND gender IN (?, 'Не важно')""".format(','.join('?'*len(exclude_users))),
-            [*exclude_users, current_user['gender'], current_user['preferred_gender']]
-        )
-
+    """SELECT 
+        u.id, u.name, u.age, u.kazakh_level, 
+        u.gender, u.preferred_gender, u.telegram_username,
+        COALESCE(f.avg_rating, 3.0) as rating
+    FROM users u
+    LEFT JOIN (
+        SELECT 
+            to_user, 
+            (AVG(question1) + AVG(question2) + AVG(question3)) / 3.0 as avg_rating
+        FROM feedback 
+        GROUP BY to_user
+    ) f ON u.id = f.to_user
+    WHERE u.id NOT IN ({}) 
+    AND u.preferred_gender IN (?, 'Не важно')
+    AND u.gender IN (?, 'Не важно')
+    ORDER BY ABS(COALESCE(f.avg_rating, 3.0) - ?) ASC
+    LIMIT 50""".format(','.join('?'*len(exclude_users))),
+    [*exclude_users, current_user['gender'], current_user['preferred_gender'], current_rating]
+)
         for match in potential_matches:
             if (level_match(current_user['kazakh_level'], match['kazakh_level']) and 
                age_overlap(current_user['age'], match['age'])):
@@ -322,7 +465,8 @@ def find_match(chat_id):
                 )
                 
                 # Планируем отзыв
-                schedule_review(chat_id, match['id'])
+                schedule_review(chat_id, match['id'])  # Для первого пользователя
+                schedule_review(match['id'], chat_id)  # Для второго пользователя
                 return
 
         bot.send_message(chat_id, "😕 Пока нет подходящих пар. Попробуйте позже.")
@@ -350,8 +494,10 @@ def schedule_review_check():
         try:
             now = datetime.now(timezone.utc)
             reviews = db.execute(
-                "SELECT chat_id1, chat_id2, send_time FROM review_queue"
-            )
+    "SELECT chat_id1, chat_id2, send_time FROM review_queue "
+    "WHERE send_time <= ? ORDER BY send_time LIMIT 100",
+    (now.isoformat(),)
+)
             
             for review in reviews:
                 if datetime.fromisoformat(review['send_time']) <= now:
@@ -367,82 +513,119 @@ def schedule_review_check():
             logger.error(f"Ошибка проверки отзывов: {traceback.format_exc()}")
             time.sleep(300)
 
+# Улучшенная send_review_request
 def send_review_request(chat_id, partner_id):
     """Отправляет запрос на отзыв"""
     try:
-        message = (
-            "Оцените собеседника (1-5):\n"
-            "1) Легкость общения\n"
-            "2) Активность\n"
-            "3) Дружелюбие\n\n"
-            "Формат: `5,4,5 Комментарий`"
+        partner_info = db.execute(
+            "SELECT name, telegram_username FROM users WHERE id = ?", 
+            (partner_id,)
         )
         
-        bot.send_message(chat_id, message)
-        user_state[chat_id] = {'step': 'awaiting_feedback', 'partner_id': partner_id}
+        if not partner_info or len(partner_info) == 0:
+            logger.error(f"Данные партнёра {partner_id} не найдены")
+            return
+        partner = partner_info[0]
+
+        message = (
+            f"📝 *Время оставить отзыв о вашей практике с {partner['name']} (@{partner['telegram_username']})*\n\n"
+            "Пожалуйста, оцените:\n"
+            "1️⃣ Легкость общения (1-5)\n"
+            "2️⃣ Активность (1-5)\n"
+            "3️⃣ Дружелюбие (1-5)\n\n"
+            "*Формат:* `оценка1, оценка2, оценка3 [комментарий]`\n"
+            "Пример: `5, 4, 5 Отличная практика!`\n\n"
+            "Если не общались - отправьте `0`"
+        )
         
-        bot.send_message(partner_id, message)
-        user_state[partner_id] = {'step': 'awaiting_feedback', 'partner_id': chat_id}
+        markup = types.ForceReply(selective=False)
+        msg = bot.send_message(
+            chat_id, 
+            message, 
+            parse_mode='Markdown',
+            reply_markup=markup
+        )
+        
+        user_state[chat_id] = {
+            'step': 'awaiting_feedback',
+            'partner_id': partner_id,
+            'message_id': msg.message_id  # Сохраняем ID сообщения для возможного редактирования
+        }
     
     except Exception as e:
         logger.error(f"Ошибка отправки отзыва: {traceback.format_exc()}")
+        bot.send_message(chat_id, "⚠️ Не удалось отправить запрос отзыва")
 
+# Улучшенная process_feedback
 @bot.message_handler(func=lambda m: user_state.get(m.chat.id, {}).get('step') == 'awaiting_feedback')
 def process_feedback(message):
     """Обработка отзыва от пользователя"""
     try:
         chat_id = message.chat.id
-        partner_id = user_state[chat_id]['partner_id']
-        text = message.text.strip()
+        state = user_state.get(chat_id, {})
+        
+        if not state or 'partner_id' not in state:
+            bot.send_message(chat_id, "⚠️ Сессия устарела. Начните заново.")
+            return
 
-        # Проверка существующего отзыва
-        existing = db.execute(
-            "SELECT 1 FROM feedback WHERE from_user = ? AND to_user = ?",
+        partner_id = state['partner_id']
+
+        is_valid_pair = db.execute(
+            "SELECT 1 FROM matches WHERE user1 = ? AND user2 = ?",
             (chat_id, partner_id)
         )
-        if existing:
-            bot.send_message(chat_id, "⚠️ Вы уже оставили отзыв")
+        if not is_valid_pair or len(is_valid_pair) == 0:
+            bot.send_message(chat_id, "❌ Нельзя оставить отзыв этому пользователю")
+            if chat_id in user_state:
+                del user_state[chat_id]
             return
-
-        # Парсинг оценок
-        parts = text.split(maxsplit=1)
-        scores = list(map(int, parts[0].split(',')))
-        if len(scores) != 3:
-            raise ValueError("Нужно 3 оценки")
         
-        comment = parts[1] if len(parts) > 1 else ""
-        if any(s in [1,2] for s in scores) and not comment:
-            bot.send_message(chat_id, "❗ При низкой оценке нужен комментарий")
+        text = message.text.strip()
+
+        # Обработка отмены
+        if text == '0':
+            bot.send_message(chat_id, "✅ Спасибо, мы учтём что встреча не состоялась")
+            del user_state[chat_id]
             return
 
-        # Сохранение отзыва
+        # Валидация и парсинг
+        parts = text.split(maxsplit=1)
+        if len(parts[0].split(',')) != 3:
+            raise ValueError("Нужно 3 оценки через запятую")
+
+        scores = [int(s.strip()) for s in parts[0].split(',')]
+        if any(s < 1 or s > 5 for s in scores):
+            raise ValueError("Оценки должны быть от 1 до 5")
+
+        comment = parts[1] if len(parts) > 1 else None
+        if any(s <= 2 for s in scores) and not comment:
+            raise ValueError("Для низких оценок нужен комментарий")
+
+        # Сохранение в БД
         db.execute(
-            """INSERT INTO feedback 
-            (from_user, to_user, question1, question2, question3, comment, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (chat_id, partner_id, *scores, comment, datetime.now(timezone.utc).isoformat()),
-            commit=True
-        )
+    """INSERT INTO feedback 
+    (from_user, to_user, question1, question2, question3, comment, timestamp) 
+    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+    (chat_id, partner_id, *scores, comment, datetime.now(timezone.utc).isoformat()),
+    commit=True
+)
+        update_user_rating(partner_id)
 
-        # Блокировка плохих пар
-        if any(s <= 3 for s in scores):
-            db.execute(
-                "INSERT OR IGNORE INTO past_matches (user1, user2, match_time) VALUES (?, ?, ?)",
-                (chat_id, partner_id, datetime.now(timezone.utc).isoformat()),
-                commit=True
-            )
-            db.execute(
-                "INSERT OR IGNORE INTO past_matches (user1, user2, match_time) VALUES (?, ?, ?)",
-                (partner_id, chat_id, datetime.now(timezone.utc).isoformat()),
-                commit=True
-            )
+        # Уведомление
+        bot.send_message(chat_id, "✅ Спасибо за ваш отзыв!")
+        
+        # Очистка состояния
+        if chat_id in user_state:
+            del user_state[chat_id]
 
-        bot.send_message(chat_id, "✅ Отзыв сохранен")
-        del user_state[chat_id]
-
+    except ValueError as ve:
+        logger.warning(f"Некорректный отзыв: {ve}")
+        bot.send_message(chat_id, f"⚠️ {ve}\nПожалуйста, используйте правильный формат")
     except Exception as e:
         logger.error(f"Ошибка обработки отзыва: {traceback.format_exc()}")
-        bot.send_message(message.chat.id, "⚠️ Ошибка. Используйте формат: `5,4,5 Комментарий`")
+        bot.send_message(chat_id, "⚠️ Ошибка обработки. Попробуйте позже")
+        if chat_id in user_state:
+            del user_state[chat_id]
 
 # --- Webhook обработчики ---
 @app.route('/' + BOT_TOKEN, methods=['POST'])
