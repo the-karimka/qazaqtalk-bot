@@ -8,3 +8,4 @@ python-dotenv==1.0.1
 flask==3.0.3
 werkzeug==3.0.3
 gunicorn==21.2.0
+waitress==2.1.2
