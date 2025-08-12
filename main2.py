@@ -18,6 +18,13 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 PORT = int(os.getenv('PORT', 8080))
 
+# Debug logging for configuration
+logger.info(f"Configuration loaded:")
+logger.info(f"DB_PATH: {DB_PATH}")
+logger.info(f"BOT_TOKEN: {'Set' if BOT_TOKEN else 'Not set'}")
+logger.info(f"WEBHOOK_URL: {WEBHOOK_URL}")
+logger.info(f"PORT: {PORT}")
+
 # Настройка логгирования
 logging.basicConfig(
     level=logging.INFO,
@@ -26,11 +33,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 bot = TeleBot(BOT_TOKEN)
+logger.info(f"Bot initialized with token: {BOT_TOKEN[:10]}..." if BOT_TOKEN else "Bot token not set!")
 app = Flask(__name__)
 
 # Глобальные переменные
 user_data = {}
 user_state = {}
+
+# Debug: List all registered handlers
+def list_handlers():
+    """Lists all registered message handlers for debugging"""
+    logger.info("Registered message handlers:")
+    for handler in bot.message_handlers:
+        logger.info(f"  - {handler['function'].__name__}: {handler['filters']}")
 
 # --- База данных ---
 class Database:
@@ -39,7 +54,7 @@ class Database:
         self.lock = threading.Lock()
         self._init_db()
     
-    def _get_connection(self):  # ✅ Correctly indented inside the class
+    def _get_connection(self):
         """Возвращает соединение с базой данных"""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
@@ -50,22 +65,23 @@ class Database:
         db_dir = os.path.dirname(self.db_path)
         if db_dir and not os.path.exists(db_dir):
             os.makedirs(db_dir)
+    
     def execute(self, query, params=(), commit=False):
-                """Безопасное выполнение SQL-запроса"""
-                with self.lock:
-                    with self._get_connection() as conn:
-                        cur = conn.cursor()
-                        try:
-                            cur.execute(query, params)
-                            if commit:
-                                conn.commit()
-                            if query.strip().upper().startswith('SELECT'):
-                                return cur.fetchall()
-                            return True
-                        except Exception as e:
-                            logger.error(f"Ошибка БД: {e}\nЗапрос: {query}\nПараметры: {params}")
-                            conn.rollback()
-                            raise
+        """Безопасное выполнение SQL-запроса"""
+        with self.lock:
+            with self._get_connection() as conn:
+                cur = conn.cursor()
+                try:
+                    cur.execute(query, params)
+                    if commit:
+                        conn.commit()
+                    if query.strip().upper().startswith('SELECT'):
+                        return cur.fetchall()
+                    return True
+                except Exception as e:
+                    logger.error(f"Ошибка БД: {e}\nЗапрос: {query}\nПараметры: {params}")
+                    conn.rollback()
+                    raise
 
     def add_missing_columns(self):
         """Добавляет отсутствующие столбцы в таблицы"""
@@ -135,8 +151,14 @@ class Database:
         logger.info(f"База данных инициализирована: {self.db_path}")
 
 # Инициализация БД
-db = Database(DB_PATH)
-db.add_missing_columns()
+try:
+    logger.info(f"Initializing database at: {DB_PATH}")
+    db = Database(DB_PATH)
+    db.add_missing_columns()
+    logger.info("Database initialized successfully")
+except Exception as e:
+    logger.error(f"Failed to initialize database: {traceback.format_exc()}")
+    raise
 
 # --- Вспомогательные функции ---
 def age_range_to_tuple(age_str):
@@ -173,13 +195,8 @@ def update_user_rating(user_id):
             "SELECT AVG((question1 + question2 + question3) / 3.0) FROM feedback WHERE to_user = ?",
             (user_id,)
         )[0][0]
-        if avg_rating is not None:  # Явная проверка на None
-            db.execute(
-            "SELECT AVG((question1 + question2 + question3) / 3.0) FROM feedback WHERE to_user = ?",
-            (user_id,)
-        )
         
-        if avg_rating:
+        if avg_rating is not None:  # Явная проверка на None
             db.execute(
                 "UPDATE users SET rating = ? WHERE id = ?",
                 (round(avg_rating, 2), user_id),
@@ -200,10 +217,12 @@ def start_registration(message, is_restart=False):
     """Общая функция для начала регистрации"""
     try:
         chat_id = message.chat.id
+        logger.info(f"Starting registration for user {chat_id}, is_restart: {is_restart}")
         
         # Более надежная очистка данных при рестарте
         if is_restart:
             try:
+                logger.info(f"Cleaning up data for restart user {chat_id}")
                 with db.lock:
                     db.execute("DELETE FROM users WHERE id = ?", (chat_id,), commit=True)
                     db.execute("DELETE FROM matches WHERE user1 = ? OR user2 = ?", 
@@ -211,12 +230,14 @@ def start_registration(message, is_restart=False):
                     # Очищаем кэшированные данные
                     user_data.pop(chat_id, None)
                     user_state.pop(chat_id, None)
+                logger.info(f"Data cleanup completed for user {chat_id}")
             except Exception as e:
                 logger.error(f"Ошибка очистки данных при restart: {traceback.format_exc()}")
                 raise
 
         # Проверяем username более надежно
         username = getattr(message.from_user, 'username', None)
+        logger.info(f"Username for user {chat_id}: {username}")
         if not username or not username.strip():
             msg = ("🔁 Анкета сброшена. Введите ваш Telegram username (должен начинаться с @):" 
                   if is_restart else "Введите ваш Telegram username (должен начинаться с @):")
@@ -226,6 +247,7 @@ def start_registration(message, is_restart=False):
 
         # Инициализация/сброс данных пользователя
         user_data[chat_id] = {'telegram_username': username.strip('@')}
+        logger.info(f"User data initialized for {chat_id}: {user_data[chat_id]}")
         
         greeting = "🔁 Анкета сброшена. Давайте начнем заново!\n\n" if is_restart else ""
         sent_msg = bot.send_message(
@@ -233,27 +255,45 @@ def start_registration(message, is_restart=False):
             f"{greeting}Сәлем! 👋 Добро пожаловать в QazaqTalk!\n\nВведите ваше имя:"
         )
         bot.register_next_step_handler(sent_msg, get_name)
+        logger.info(f"Registration flow started for user {chat_id}")
         
     except Exception as e:
         logger.error(f"Ошибка в {'/restart' if is_restart else '/start'}: {traceback.format_exc()}")
         bot.send_message(chat_id, "⚠️ Произошла ошибка. Попробуйте снова через /start")
 
+@bot.message_handler(commands=['echo'])
+def echo_command(message):
+    """Простая команда echo для тестирования"""
+    logger.info(f"Echo command received from {message.chat.id}: {message.text}")
+    bot.send_message(message.chat.id, f"Echo: {message.text}")
+
+@bot.message_handler(commands=['test'])
+def test_command(message):
+    """Тестовая команда для проверки работы бота"""
+    logger.info(f"Test command received from {message.chat.id}")
+    bot.send_message(message.chat.id, "✅ Бот работает! Команда /test получена.")
+
 @bot.message_handler(commands=['start'])
 def handle_start(message):
     """Обработчик команды /start"""
+    logger.info(f"Start command received from {message.chat.id}")
     start_registration(message)
 
 @bot.message_handler(commands=['restart'])
 def handle_restart(message):
     """Обработчик команды /restart"""
+    logger.info(f"Restart command received from {message.chat.id}")
     start_registration(message, is_restart=True)
 
 @bot.message_handler(commands=['guidebook'])
 def send_guidebook(message):
     """Улучшенный обработчик команды /guidebook"""
+    logger.info(f"Guidebook command received from {message.chat.id}")
+    
     try:
         chat_id = message.chat.id
-        guidebook_path = 'guidebook.docx'
+        guidebook_path = os.path.join(os.path.dirname(__file__), 'guidebook.docx')
+        logger.info(f"Guidebook path: {guidebook_path}")
         
         # Проверяем доступность файла
         if not os.path.exists(guidebook_path):
@@ -266,6 +306,7 @@ def send_guidebook(message):
 
         # Проверяем размер файла
         file_size = os.path.getsize(guidebook_path) / (1024 * 1024)  # в MB
+        logger.info(f"Guidebook file size: {file_size:.2f}MB")
         if file_size > 50:  # Telegram ограничивает 50MB для ботов
             logger.error(f"Файл гайдбука слишком большой: {file_size:.2f}MB")
             bot.send_message(
@@ -275,6 +316,7 @@ def send_guidebook(message):
             return
 
         # Отправляем файл с обработкой возможных ошибок
+        logger.info(f"Отправка гайдбука пользователю {chat_id}")
         with open(guidebook_path, 'rb') as f:
             bot.send_chat_action(chat_id, 'upload_document')
             bot.send_document(
@@ -284,6 +326,7 @@ def send_guidebook(message):
                 timeout=30,
                 visible_file_name="QazaqTalk_Guide.docx"  # Красивое имя файла
             )
+        logger.info(f"Гайдбук успешно отправлен пользователю {chat_id}")
             
     except Exception as e:
         logger.error(f"Ошибка отправки гайдбука: {traceback.format_exc()}")
@@ -292,7 +335,7 @@ def send_guidebook(message):
             "⚠️ Произошла непредвиденная ошибка при отправке гайдбука. Попробуйте позже."
         )
 
-@bot.message_handler(func=lambda message: True)
+@bot.message_handler(func=lambda message: not message.text.strip().startswith('/'))
 def handle_all_messages(message):
     """Обработка всех остальных сообщений"""
     bot.send_message(message.chat.id, "Спасибо за сообщение! Пожалуйста, используйте /start для начала работы.")
@@ -627,16 +670,34 @@ def process_feedback(message):
         if chat_id in user_state:
             del user_state[chat_id]
 
+@app.route('/test')
+def test():
+    return "Тест успешен!", 200
+
 # --- Webhook обработчики ---
 @app.route('/' + BOT_TOKEN, methods=['POST'])
 def webhook():
     """Endpoint для обработки webhook-запросов от Telegram"""
+    logger.info(f"Webhook received: {request.headers.get('content-type')}")
+    
     if request.headers.get('content-type') == 'application/json':
-        json_data = request.get_data().decode('utf-8')
-        update = types.Update.de_json(json_data)
-        bot.process_new_updates([update])
-        return '', 200
-    return 'Bad request', 400
+        try:
+            json_data = request.get_data().decode('utf-8')
+            logger.info(f"Webhook data: {json_data[:200]}...")  # Log first 200 chars
+            
+            update = types.Update.de_json(json_data)
+            logger.info(f"Update object created: {update}")
+            
+            bot.process_new_updates([update])
+            logger.info("Update processed successfully")
+            
+            return '', 200
+        except Exception as e:
+            logger.error(f"Error processing webhook: {traceback.format_exc()}")
+            return 'Error processing update', 500
+    else:
+        logger.warning(f"Invalid content-type: {request.headers.get('content-type')}")
+        return 'Bad request', 400
 
 @app.route('/')
 def index():
@@ -651,6 +712,7 @@ if __name__ == '__main__':
         
         # 2. Настройка webhook
         logger.info("Настройка webhook...")
+        logger.info(f"Removing existing webhook...")
         bot.remove_webhook()
         time.sleep(2)  # Увеличенная задержка для надежности
         
@@ -658,6 +720,10 @@ if __name__ == '__main__':
         if not WEBHOOK_URL:
             logger.error("WEBHOOK_URL не установлен!")
             raise ValueError("WEBHOOK_URL не установлен")
+        
+        logger.info(f"Setting webhook to: {webhook_url}")
+        logger.info(f"BOT_TOKEN: {BOT_TOKEN[:10]}..." if BOT_TOKEN else "Not set!")
+        logger.info(f"WEBHOOK_URL: {WEBHOOK_URL}")
             
         bot.set_webhook(
             url=webhook_url,
@@ -665,6 +731,13 @@ if __name__ == '__main__':
             allowed_updates=["message", "callback_query"]
         )
         logger.info(f"Webhook установлен на: {webhook_url}")
+        
+        # Проверяем статус webhook
+        webhook_info = bot.get_webhook_info()
+        logger.info(f"Webhook info: {webhook_info}")
+        
+        # Debug: List all registered handlers
+        list_handlers()
         
         # 3. Запуск сервера
         logger.info(f"Запуск сервера на порту {PORT}...")
